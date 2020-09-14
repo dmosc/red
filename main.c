@@ -1,6 +1,7 @@
-/*** includes ***/
+/*** Includes ***/
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -11,7 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/*** definitions ***/
+/*** Definitions ***/
 #define _DEFAULT_SOURCE
 #define _BSD_SOURCE
 #define _GNU_SOURCE
@@ -19,6 +20,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define BUFFER_INIT {NULL, 0}
 enum {
+    BACKSPACE = 127,
     UP = 1000,
     DOWN,
     RIGHT,
@@ -30,7 +32,7 @@ enum {
     PAGE_DOWN
 };
 
-/*** structs ***/
+/*** Structs ***/
 typedef struct document_row {
     char *content, *render_content;
     int size, render_size;
@@ -50,11 +52,19 @@ struct editor_config {
 
 struct editor_config EC;
 
-/*** utils ***/
+/*** Utils ***/
 void clear_and_reposition_cursor() {
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
 }
+
+/*** Prototypes ***/
+void row_append_render(document_row *row);
+void insert_char(int c);
+void insert_new_line();
+void refresh_screen();
+void delete_char();
+void save_file();
 
 /*** Buffer printer ***/
 struct buffer {
@@ -75,7 +85,7 @@ void buffer_drop(struct buffer *buff) {
     free(buff->content);
 }
 
-/*** functions ***/
+/*** Functions ***/
 void editor_exit(const char *s) {
     clear_and_reposition_cursor();
 
@@ -211,77 +221,7 @@ void editor_init() {
     EC.rows -= 2; // Leave space for status bar and status messages.
 }
 
-/*** input functions ***/
-void move_cursor(int key) {
-    document_row *row = EC.cursor_y >= EC.rows ? NULL : &EC.row[EC.cursor_y];
-    switch (key) {
-        case UP:
-            if (EC.cursor_y != 0) --EC.cursor_y;
-            break;
-        case DOWN:
-            if (EC.cursor_y < EC.document_rows) ++EC.cursor_y;
-            break;
-        case RIGHT:
-            if (row && EC.cursor_x < row->size) {
-                ++EC.cursor_x;
-            } else if (row && EC.cursor_x == row->size) {
-                ++EC.cursor_y;
-                EC.cursor_x = 0;
-            }
-            break;
-        case LEFT:
-            if (EC.cursor_x != 0) {
-                --EC.cursor_x;
-            } else if (EC.cursor_y > 0) {
-                --EC.cursor_y;
-                EC.cursor_x = EC.row[EC.cursor_y].size;
-            }
-            break;
-    }
-
-    row = (EC.cursor_y >= EC.document_rows) ? NULL : &EC.row[EC.cursor_y];
-    int size = row ? row->size : 0;
-    if (EC.cursor_x > size) {
-        EC.cursor_x = size;
-    }
-}
-
-void process_key() {
-    int c = read_key();
-    switch (c) {
-        case CTRL_KEY('q'):
-            clear_and_reposition_cursor();
-            exit(0);
-        case HOME_KEY:
-            EC.cursor_x = 0;
-            break;
-        case END_KEY:
-            if (EC.cursor_y < EC.document_rows) EC.cursor_x = EC.row[EC.cursor_y].size;
-            break;
-        case PAGE_UP:
-        case PAGE_DOWN: {
-            if (c == PAGE_UP) {
-                EC.cursor_y = EC.row_offset;
-            } else {
-                EC.cursor_y = EC.row_offset + EC.document_rows - 1;
-                if (EC.cursor_y > EC.document_rows) EC.cursor_y = EC.document_rows;
-            }
-
-            int times = EC.rows;
-            while (times--)
-                move_cursor(c == PAGE_UP ? UP : DOWN);
-            break;
-        }
-        case UP:
-        case DOWN:
-        case RIGHT:
-        case LEFT:
-            move_cursor(c);
-            break;
-    }
-}
-
-/*** output functions ***/
+/*** Output functions ***/
 void scroll_window() {
     if (EC.cursor_y < EC.row_offset) // Check if cursor above visible window and scroll up
         EC.row_offset = EC.cursor_y;
@@ -335,7 +275,7 @@ void draw_status_bar(struct buffer *buff) {
             sizeof(status),
             " %.20s - %d lines",
             EC.file_name ? EC.file_name : "[New document]",
-            EC.rows
+            EC.document_rows
     );
 
     if (cols > EC.cols) cols = EC.cols;
@@ -367,7 +307,143 @@ void refresh_screen() {
     buffer_drop(&buff);
 }
 
-/*** file functions ***/
+/*** Input functions ***/
+char *show_prompt(char *prompt) {
+    size_t size = 128, current_size = 0;
+    char *buffer = malloc(size);
+    buffer[0] = '\0';
+
+    while (1) {
+        set_status(prompt, buffer);
+        refresh_screen();
+
+        int c = read_key();
+        if (c == '\x1b') { // If user "escapes", the prompt gets cancelled.
+            set_status("");
+            free(buffer);
+            return NULL;
+        } else if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+            if (current_size != 0) buffer[--current_size] = '\0';
+        } else if (c == '\r') {
+            if (current_size != 0) { // When the user presses enter, return the prompt content.
+                set_status("");
+                return buffer;
+            }
+        } else if (!iscntrl(c) && c < 128) { // Make sure to avoid reacting to any escape sequence.
+            if (current_size == size - 1) {
+                size *= 2;
+                buffer = realloc(buffer, size);
+            }
+            buffer[current_size++] = c;
+            buffer[current_size] = '\0';
+        }
+    }
+}
+
+void move_cursor(int key) {
+    document_row *row = EC.cursor_y >= EC.rows ? NULL : &EC.row[EC.cursor_y];
+    switch (key) {
+        case UP:
+            if (EC.cursor_y != 0) --EC.cursor_y;
+            break;
+        case DOWN:
+            if (EC.cursor_y < EC.document_rows) ++EC.cursor_y;
+            break;
+        case RIGHT:
+            if (row && EC.cursor_x < row->size) {
+                ++EC.cursor_x;
+            } else if (row && EC.cursor_x == row->size) {
+                ++EC.cursor_y;
+                EC.cursor_x = 0;
+            }
+            break;
+        case LEFT:
+            if (EC.cursor_x != 0) {
+                --EC.cursor_x;
+            } else if (EC.cursor_y > 0) {
+                --EC.cursor_y;
+                EC.cursor_x = EC.row[EC.cursor_y].size;
+            }
+            break;
+    }
+
+    row = (EC.cursor_y >= EC.document_rows) ? NULL : &EC.row[EC.cursor_y];
+    int size = row ? row->size : 0;
+    if (EC.cursor_x > size) {
+        EC.cursor_x = size;
+    }
+}
+
+void process_key() {
+    int c = read_key();
+    switch (c) {
+        case '\r':
+            insert_new_line();
+            break;
+        case CTRL_KEY('q'):
+            clear_and_reposition_cursor();
+            exit(0);
+        case CTRL_KEY('s'):
+            save_file();
+        case HOME_KEY:
+            EC.cursor_x = 0;
+            break;
+        case END_KEY:
+            if (EC.cursor_y < EC.document_rows) EC.cursor_x = EC.row[EC.cursor_y].size;
+            break;
+        case BACKSPACE:
+        case CTRL_KEY('h'):
+        case DEL_KEY:
+            if (c == DEL_KEY) move_cursor(RIGHT);
+            delete_char();
+            break;
+        case PAGE_UP:
+        case PAGE_DOWN: {
+            if (c == PAGE_UP) {
+                EC.cursor_y = EC.row_offset;
+            } else {
+                EC.cursor_y = EC.row_offset + EC.document_rows - 1;
+                if (EC.cursor_y > EC.document_rows) EC.cursor_y = EC.document_rows;
+            }
+
+            int times = EC.rows;
+            while (times--)
+                move_cursor(c == PAGE_UP ? UP : DOWN);
+            break;
+        }
+        case UP:
+        case DOWN:
+        case RIGHT:
+        case LEFT:
+            move_cursor(c);
+            break;
+        case CTRL_KEY('l'):
+        case '\x1b':
+            break;
+        default:
+            insert_char(c);
+            break;
+    }
+}
+
+/*** File functions ***/
+void row_append(int i, char *line, size_t size) {
+    if (i < 0 || i > EC.document_rows) return;
+
+    EC.row = realloc(EC.row, sizeof(document_row) * (EC.document_rows + 1));
+    memmove(&EC.row[i + 1], &EC.row[i], sizeof(document_row) * (EC.document_rows - i));
+
+    EC.row[i].size = size;
+    EC.row[i].content = malloc(size + 1);
+    memcpy(EC.row[i].content, line, size);
+    EC.row[i].content[size] = '\0';
+    EC.row[i].render_size = 0;
+    EC.row[i].render_content = NULL;
+
+    row_append_render(&EC.row[i]);
+    ++EC.document_rows;
+}
+
 void row_append_render(document_row *row) {
     int i, tabs = 0;
 
@@ -391,19 +467,97 @@ void row_append_render(document_row *row) {
     row->render_size = render_size;
 }
 
-void row_append(char *line, size_t size) {
-    EC.row = realloc(EC.row, sizeof(document_row) * (EC.document_rows + 1));
+void row_append_string(document_row *row, char *c, size_t size) {
+    row->content = realloc(row->content ,row->size + size + 1);
+    memcpy(&row->content[row->size], c, size);
+    row->size += size;
+    row->content[row->size] = '\0';
+    row_append_render(row);
+}
 
-    int i = EC.document_rows;
-    EC.row[i].size = size;
-    EC.row[i].content = malloc(size + 1);
-    memcpy(EC.row[i].content, line, size);
-    EC.row[i].content[size] = '\0';
-    EC.row[i].render_size = 0;
-    EC.row[i].render_content = NULL;
+void row_free(document_row *row) {
+    free(row->content);
+    free(row->render_content);
+}
 
-    row_append_render(&EC.row[i]);
-    ++EC.document_rows;
+void row_delete(int i) {
+    if (i < 0 || i >= EC.document_rows) return;
+    row_free(&EC.row[i]);
+    memmove(&EC.row[i], &EC.row[i + 1], sizeof(document_row) * (EC.document_rows - i - 1));
+    --EC.document_rows;
+}
+
+void row_insert_char(document_row *row, int i, int c) {
+    if (i < 0 || i > row->size) i = row->size;
+    row->content = realloc(row->content, row->size + 2);
+    memmove(&row->content[i + 1], &row->content[i], row->size - i + 1);
+    ++row->size;
+    row->content[i] = c;
+    row_append_render(row);
+}
+
+void insert_char(int c) {
+    if (EC.cursor_y == EC.document_rows) // If cursor is at the end of the file, append a new row.
+        row_append(EC.document_rows, "", 0);
+    row_insert_char(&EC.row[EC.cursor_y], EC.cursor_x, c);
+    ++EC.cursor_x;
+}
+
+void row_delete_char(document_row *row, int i) {
+    if (i < 0 || i > row->size) return;
+    memmove(&row->content[i], &row->content[i + 1], row->size - i);
+    --row->size;
+    row_append_render(row);
+}
+
+void delete_char() {
+    if (EC.cursor_y == EC.document_rows) return;
+    if (EC.cursor_x == 0 && EC.cursor_y == 0) return;
+
+    document_row * row = &EC.row[EC.cursor_y];
+    if (EC.cursor_x > 0) {
+        row_delete_char(row, EC.cursor_x - 1);
+        --EC.cursor_x;
+    } else {
+        EC.cursor_x = EC.row[EC.cursor_y - 1].size;
+        row_append_string(&EC.row[EC.cursor_y - 1], row->content, row->size);
+        row_delete(EC.cursor_y);
+        --EC.cursor_y;
+    }
+}
+
+char *rows_to_string(int *buff_size) {
+    int size = 0, i;
+    for (i = 0; i < EC.document_rows; ++i)
+        size += EC.row[i].size + 1;
+    *buff_size = size;
+
+    char *buffer = malloc(size);
+    char *current_row = buffer;
+    for (i = 0; i < EC.document_rows; ++i) {
+        memcpy(current_row, EC.row[i].content, EC.row[i].size);
+        current_row += EC.row[i].size;
+        *current_row = '\n';
+        ++current_row;
+    }
+
+    return buffer;
+}
+
+void insert_new_line() {
+    if (EC.cursor_x == 0) {
+        row_append(EC.cursor_y, "", 0);
+    } else {
+        document_row *row = &EC.row[EC.cursor_y];
+        row_append(EC.cursor_y + 1, &row->content[EC.cursor_x], row->size - EC.cursor_x);
+        row = &EC.row[EC.cursor_y];
+        row->size = EC.cursor_x;
+        row->content[row->size] = '\0';
+        row_append_render(row);
+    }
+
+    ++EC.cursor_y;
+    EC.cursor_x = 0;
 }
 
 void open_file(char *file_name) {
@@ -419,14 +573,39 @@ void open_file(char *file_name) {
     while ((size = getline(&line, &capacity, file)) != -1) {
         while (size > 0 && (line[size - 1] == '\n' || line[size - 1] == '\r'))
             size--;
-        row_append(line, size);
+        row_append(EC.document_rows, line, size);
     }
 
     free(line);
     fclose(file);
 }
 
-/*** init ***/
+void save_file() {
+    if (!EC.file_name) EC.file_name = show_prompt("Save as: %s");
+    if (!EC.file_name) {
+        set_status("Cancelled operation!");
+        return;
+    }
+
+    int size;
+    char *buffer = rows_to_string(&size);
+    int file = open(EC.file_name, O_RDWR | O_CREAT, 0644);
+    if (file != -1) {
+        if (ftruncate(file, size) != -1) {
+            if (write(file, buffer, size) == size) {
+                close(file);
+                free(buffer);
+                set_status("%d bytes written to disk", size);
+                return;
+            }
+        }
+        close(file);
+    }
+    free(buffer);
+    set_status("Can't save! I/O error: %s", strerror(errno));
+}
+
+/*** Init ***/
 int main(int argc, char *argv[]) {
     editor_enable();
     editor_init();
@@ -434,12 +613,10 @@ int main(int argc, char *argv[]) {
         open_file(argv[1]);
     }
 
-    set_status("Ctrl-Q = Quit");
+    set_status("Ctrl + [Q-Quit, S-Save]");
 
     while (1) {
         refresh_screen();
         process_key();
     }
-
-    return 0;
 }
