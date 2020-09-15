@@ -19,8 +19,11 @@
 #define TAB_STOP 4
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define BUFFER_INIT {NULL, 0}
-enum {
+#define enum_to_string(m) #m
+#define stringify(m) enum_to_string(m)
+enum KEYS {
     BACKSPACE = 127,
+    ESCAPE = 27,
     UP = 1000,
     DOWN,
     RIGHT,
@@ -29,13 +32,20 @@ enum {
     HOME_KEY,
     END_KEY,
     PAGE_UP,
-    PAGE_DOWN
+    PAGE_DOWN,
+    READ_MODE,
+    EDIT_MODE
+};
+enum HIGHLIGHTS {
+    HL_DEFAULT = 0,
+    HL_NUMBER
 };
 
 /*** Structs ***/
 typedef struct document_row {
     char *content, *render_content;
     int size, render_size;
+    unsigned char *highlight;
 } document_row;
 
 struct editor_config {
@@ -47,6 +57,7 @@ struct editor_config {
     char *file_name;
     char status[80];
     time_t status_time;
+    int mode;
     struct termios initial_state;
 };
 
@@ -60,10 +71,15 @@ void clear_and_reposition_cursor() {
 
 /*** Prototypes ***/
 void row_append_render(document_row *row);
+
 void insert_char(int c);
+
 void insert_new_line();
+
 void refresh_screen();
+
 void delete_char();
+
 void save_file();
 
 /*** Buffer printer ***/
@@ -216,9 +232,31 @@ void editor_init() {
     EC.file_name = NULL;
     EC.status[0] = '\0';
     EC.status_time = 0;
+    EC.mode = READ_MODE;
 
     if (window_size(&EC.rows, &EC.cols) == -1) editor_exit("window_size");
     EC.rows -= 2; // Leave space for status bar and status messages.
+}
+
+/*** Syntax highlighting functions ***/
+void row_set_syntax(document_row *row) {
+    row->highlight = realloc(row->highlight, row->render_size);
+    memset(row->highlight, HL_DEFAULT, row->render_size);
+
+    for (int i = 0; i < row->render_size; ++i) {
+        if (isdigit(row->render_content[i])) {
+            row->highlight[i] = HL_NUMBER;
+        }
+    }
+}
+
+int syntax_to_color_code(int highlight) {
+    switch (highlight) {
+        case HL_NUMBER:
+            return 31;
+        default:
+            return 39;
+    }
 }
 
 /*** Output functions ***/
@@ -250,7 +288,29 @@ void draw_rows(struct buffer *buff) {
             int size = EC.row[i].render_size - EC.col_offset;
             if (size < 0) size = 0;
             if (size > EC.cols) size = EC.cols;
-            buffer_append(buff, &EC.row[i].render_content[EC.col_offset], size);
+
+            char *c = &EC.row[i].render_content[EC.col_offset];
+            unsigned char *highlight = &EC.row[i].highlight[EC.col_offset];
+            int current_color = -1;
+            for (int j = 0; j < size; ++j) {
+                if (highlight[j] == HL_DEFAULT) { // Color numbers in red
+                    if (current_color != -1) {
+                        current_color = -1;
+                        buffer_append(buff, "\x1b[39m", 5);
+                    }
+                    buffer_append(buff, &c[j], 1);
+                } else {
+                    int color = syntax_to_color_code(highlight[j]);
+                    if (color != current_color) {
+                        current_color = color;
+                        char line[16];
+                        int line_size = snprintf(line, sizeof(line), "\x1b[%dm", color);
+                        buffer_append(buff, line, line_size);
+                    }
+                    buffer_append(buff, &c[j], 1);
+                }
+                buffer_append(buff, "\x1b[39m", 5);
+            }
         }
 
         buffer_append(buff, "\x1b[K", 3);
@@ -269,13 +329,22 @@ void draw_message_bar(struct buffer *buff) {
 void draw_status_bar(struct buffer *buff) {
     buffer_append(buff, "\x1b[7m", 4); // Invert colors
 
-    char status[80];
+    char status[80], *mode;
+    switch (EC.mode) {
+        case READ_MODE:
+            mode = stringify(READ_MODE);
+            break;
+        case EDIT_MODE:
+            mode = stringify(EDIT_MODE);
+            break;
+    }
     int cols = snprintf(
             status,
             sizeof(status),
-            " %.20s - %d lines",
+            " %.20s - %d lines [%s]",
             EC.file_name ? EC.file_name : "[New document]",
-            EC.document_rows
+            EC.document_rows,
+            mode
     );
 
     if (cols > EC.cols) cols = EC.cols;
@@ -374,29 +443,73 @@ void move_cursor(int key) {
     }
 }
 
+void process_command() {
+    char *request = show_prompt("/%s");
+    char *command = strtok(request, " ");
+
+    if (strcmp(command, "save") == 0 || strcmp(command, "s") == 0) { // Save document's current state
+        save_file();
+    } else if (strcmp(command, "line") == 0 || strcmp(command, "l") == 0 || strcmp(command, "n") == 0) { // Jump to line
+        int line = atoi(strtok(NULL, " "));
+        EC.cursor_y = line;
+    } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0) {
+        char *query = strtok(NULL, " ");
+        struct buffer buff = BUFFER_INIT;
+
+        if (query) {
+            while (query != NULL) {
+                buffer_append(&buff, query, strlen(query));
+                buffer_append(&buff, " ", 1);
+                query = strtok(NULL, " ");
+            }
+
+            int incidences = 0;
+            for (int i = EC.document_rows - 2; i >= 0; --i) {
+                document_row *row = &EC.row[i];
+                char *match = strstr(row->render_content, buff.content);
+                if (match) {
+                    EC.cursor_y = i;
+                    EC.cursor_x = match - row->render_content;
+                    EC.row_offset = EC.document_rows;
+                    ++incidences;
+                }
+            }
+
+            set_status("%d incidences found", incidences);
+            free(query);
+            buffer_drop(&buff);
+        } else {
+            set_status("A query is required! - find [a-zA-Z1-9]");
+        }
+    } else {
+        set_status("Command not found! Visit the docs at https://github.com/oscardavidrm/red");
+    }
+}
+
 void process_key() {
     int c = read_key();
-    switch (c) {
-        case '\r':
-            insert_new_line();
-            break;
+    switch (c) { // Switch between editor modes and I/O operations.
+        case CTRL_KEY('r'):
+            EC.mode = READ_MODE;
+            return;
+        case CTRL_KEY('e'):
+            EC.mode = EDIT_MODE;
+            return;
+        case CTRL_KEY('c'):
+            process_command();
+            return;
         case CTRL_KEY('q'):
             clear_and_reposition_cursor();
             exit(0);
-        case CTRL_KEY('s'):
-            save_file();
+    }
+
+    switch (c) { // Moving cursor and traversing the document
         case HOME_KEY:
             EC.cursor_x = 0;
-            break;
+            return;
         case END_KEY:
             if (EC.cursor_y < EC.document_rows) EC.cursor_x = EC.row[EC.cursor_y].size;
-            break;
-        case BACKSPACE:
-        case CTRL_KEY('h'):
-        case DEL_KEY:
-            if (c == DEL_KEY) move_cursor(RIGHT);
-            delete_char();
-            break;
+            return;
         case PAGE_UP:
         case PAGE_DOWN: {
             if (c == PAGE_UP) {
@@ -409,20 +522,32 @@ void process_key() {
             int times = EC.rows;
             while (times--)
                 move_cursor(c == PAGE_UP ? UP : DOWN);
-            break;
+            return;
         }
         case UP:
         case DOWN:
         case RIGHT:
         case LEFT:
             move_cursor(c);
-            break;
-        case CTRL_KEY('l'):
-        case '\x1b':
-            break;
-        default:
-            insert_char(c);
-            break;
+            return;
+    }
+
+    if (EC.mode == EDIT_MODE) { // Edit operations
+        switch (c) {
+            case '\r':
+                insert_new_line();
+                break;
+            case BACKSPACE:
+            case CTRL_KEY('h'):
+            case DEL_KEY:
+                if (c == DEL_KEY) move_cursor(RIGHT);
+                delete_char();
+                break;
+            case CTRL_KEY('l'):
+            default:
+                insert_char(c);
+                break;
+        }
     }
 }
 
@@ -439,6 +564,7 @@ void row_append(int i, char *line, size_t size) {
     EC.row[i].content[size] = '\0';
     EC.row[i].render_size = 0;
     EC.row[i].render_content = NULL;
+    EC.row[i].highlight = NULL;
 
     row_append_render(&EC.row[i]);
     ++EC.document_rows;
@@ -465,10 +591,11 @@ void row_append_render(document_row *row) {
 
     row->render_content[render_size] = '\0';
     row->render_size = render_size;
+    row_set_syntax(row);
 }
 
 void row_append_string(document_row *row, char *c, size_t size) {
-    row->content = realloc(row->content ,row->size + size + 1);
+    row->content = realloc(row->content, row->size + size + 1);
     memcpy(&row->content[row->size], c, size);
     row->size += size;
     row->content[row->size] = '\0';
@@ -478,6 +605,7 @@ void row_append_string(document_row *row, char *c, size_t size) {
 void row_free(document_row *row) {
     free(row->content);
     free(row->render_content);
+    free(row->highlight);
 }
 
 void row_delete(int i) {
@@ -514,7 +642,7 @@ void delete_char() {
     if (EC.cursor_y == EC.document_rows) return;
     if (EC.cursor_x == 0 && EC.cursor_y == 0) return;
 
-    document_row * row = &EC.row[EC.cursor_y];
+    document_row *row = &EC.row[EC.cursor_y];
     if (EC.cursor_x > 0) {
         row_delete_char(row, EC.cursor_x - 1);
         --EC.cursor_x;
@@ -613,7 +741,7 @@ int main(int argc, char *argv[]) {
         open_file(argv[1]);
     }
 
-    set_status("Ctrl + [Q-Quit, S-Save]");
+    set_status("Ctrl + [Q-Quit, S-Save, E-Edit, C-Command, R-Read]");
 
     while (1) {
         refresh_screen();
