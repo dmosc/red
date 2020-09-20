@@ -458,8 +458,8 @@ void process_command() {
     } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0 || strcmp(command, "regex") == 0) { // Regular expression                                                         
         char *pattern = strtok(NULL, " ");
 
-        if(pattern){
-        int incidences = 0;
+        if(pattern) {
+            int incidences = 0;
             for(int i = EC.document_rows - 2; i >= 0; --i) {
                 document_row *row = &EC.row[i];
 
