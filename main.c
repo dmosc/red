@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 /*** Includes ***/
 #include <ctype.h>
 #include <errno.h>
@@ -11,6 +13,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <regex.h>
 
 /*** Definitions ***/
 #define _DEFAULT_SOURCE
@@ -452,7 +455,7 @@ void process_command() {
     } else if (strcmp(command, "line") == 0 || strcmp(command, "l") == 0 || strcmp(command, "n") == 0) { // Jump to line
         int line = atoi(strtok(NULL, " "));
         EC.cursor_y = line;
-    } else if (strcmp(command, "regex") == 0 || strcmp(command, "r") == 0) { // Regular expression                                                         
+    } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0 || strcmp(command, "regex") == 0) { // Regular expression                                                         
         char *pattern = strtok(NULL, " ");
 
         if(pattern){
