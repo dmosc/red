@@ -452,6 +452,36 @@ void process_command() {
     } else if (strcmp(command, "line") == 0 || strcmp(command, "l") == 0 || strcmp(command, "n") == 0) { // Jump to line
         int line = atoi(strtok(NULL, " "));
         EC.cursor_y = line;
+    } else if (strcmp(command, "regex") == 0 || strcmp(command, "r") == 0) { // Regular expression                                                           
+        char *pattern = strtok(NULL, " ");
+
+        int incidences = 0;
+        for(int i = EC.document_rows - 2; i >= 0; --i) {
+            document_row *row = &EC.row[i];
+
+            regex_t preg;
+            size_t nmatch = 1;
+            regmatch_t pmatch[nmatch];      
+
+            regcomp(&preg, pattern, 0);      
+            int fflag = regexec(&preg, row->render_content, nmatch, pmatch, 0); 
+            
+            if(!fflag) {
+                incidences++;
+                EC.cursor_y = i;
+                EC.cursor_x = pmatch[0].rm_so;
+                EC.row_offset = EC.document_rows;
+            }
+            else if(fflag == REG_NOMATCH) {
+                ;   //ToDO
+            }
+            else {
+                set_status("Regular expression error");
+                break;
+            }
+            regfree(&preg);
+        }
+        set_status("%d incidences found", incidences);
     } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0) {
         char *query = strtok(NULL, " ");
         struct buffer buff = BUFFER_INIT;
