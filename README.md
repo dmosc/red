@@ -58,7 +58,9 @@ in a few different ways. They're separated by a `|` character.
 
 **Find search**
 > This will reposition the cursor to the first incidence that matches your search and tell you how
->many times the search repeats within the document.
+> many times the search repeats within the document.
+> The search is enhanced with POSIX regular expressions: 
+> https://en.wikibooks.org/wiki/Regular_Expressions/POSIX_Basic_Regular_Expressions
 ```
 [find | f] [search]
 ```

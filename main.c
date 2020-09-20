@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 /*** Includes ***/
 #include <ctype.h>
 #include <errno.h>
@@ -11,6 +13,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <regex.h>
 
 /*** Definitions ***/
 #define _DEFAULT_SOURCE
@@ -452,32 +455,43 @@ void process_command() {
     } else if (strcmp(command, "line") == 0 || strcmp(command, "l") == 0 || strcmp(command, "n") == 0) { // Jump to line
         int line = atoi(strtok(NULL, " "));
         EC.cursor_y = line;
-    } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0) {
-        char *query = strtok(NULL, " ");
-        struct buffer buff = BUFFER_INIT;
+    } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0 || strcmp(command, "regex") == 0) { // Regular expression                                                         
+        char *pattern = strtok(NULL, " ");
 
-        if (query) {
-            while (query != NULL) {
-                buffer_append(&buff, query, strlen(query));
-                buffer_append(&buff, " ", 1);
-                query = strtok(NULL, " ");
-            }
-
+        if (pattern) {
             int incidences = 0;
             for (int i = EC.document_rows - 2; i >= 0; --i) {
                 document_row *row = &EC.row[i];
-                char *match = strstr(row->render_content, buff.content);
-                if (match) {
-                    EC.cursor_y = i;
-                    EC.cursor_x = match - row->render_content;
-                    EC.row_offset = EC.document_rows;
-                    ++incidences;
-                }
-            }
 
+                regex_t preg;
+                int row_max_matches = 100;
+                size_t nmatch = 1;
+                regmatch_t pmatch[nmatch];      
+                regcomp(&preg, pattern, 0);      
+                char *dup = strdup(row->render_content);
+                int offset = 0;
+
+                for (int j=0; j<row_max_matches; j++) {
+                    int fflag = regexec(&preg, dup, nmatch, pmatch, 0);
+                    if (!fflag) {
+                        incidences++;
+                        EC.cursor_y = i;
+                        EC.cursor_x = pmatch[0].rm_so + offset;
+                        EC.row_offset = EC.document_rows;
+                        offset = pmatch[0].rm_eo;
+                        dup+=offset;
+                    }
+                    else if(fflag == REG_NOMATCH) {
+                        break;
+                    }
+                    else {
+                        set_status("Regular expression error");
+                        break;
+                    }
+                }
+                regfree(&preg);
+            }
             set_status("%d incidences found", incidences);
-            free(query);
-            buffer_drop(&buff);
         } else {
             set_status("A query is required! - find [a-zA-Z1-9]");
         }
