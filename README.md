@@ -62,5 +62,5 @@ in a few different ways. They're separated by a `|` character.
 > The search is enhanced with POSIX regular expressions: 
 > https://en.wikibooks.org/wiki/Regular_Expressions/POSIX_Basic_Regular_Expressions
 ```
-[find | f] [search]
+[find | f | regex] [search]
 ```

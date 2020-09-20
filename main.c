@@ -1,5 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
 /*** Includes ***/
 #include <ctype.h>
 #include <errno.h>
@@ -16,6 +14,7 @@
 #include <regex.h>
 
 /*** Definitions ***/
+#define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #define _BSD_SOURCE
 #define _GNU_SOURCE
