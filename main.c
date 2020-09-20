@@ -482,32 +482,6 @@ void process_command() {
             regfree(&preg);
         }
         set_status("%d incidences found", incidences);
-    } else if (strcmp(command, "find") == 0 || strcmp(command, "f") == 0) {
-        char *query = strtok(NULL, " ");
-        struct buffer buff = BUFFER_INIT;
-
-        if (query) {
-            while (query != NULL) {
-                buffer_append(&buff, query, strlen(query));
-                buffer_append(&buff, " ", 1);
-                query = strtok(NULL, " ");
-            }
-
-            int incidences = 0;
-            for (int i = EC.document_rows - 2; i >= 0; --i) {
-                document_row *row = &EC.row[i];
-                char *match = strstr(row->render_content, buff.content);
-                if (match) {
-                    EC.cursor_y = i;
-                    EC.cursor_x = match - row->render_content;
-                    EC.row_offset = EC.document_rows;
-                    ++incidences;
-                }
-            }
-
-            set_status("%d incidences found", incidences);
-            free(query);
-            buffer_drop(&buff);
         } else {
             set_status("A query is required! - find [a-zA-Z1-9]");
         }
